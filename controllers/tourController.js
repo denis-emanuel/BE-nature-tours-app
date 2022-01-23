@@ -1,54 +1,28 @@
 const Tour = require('./../models/tourModel');
+const APIFeatures = require('./../utils/apiFeatures');
 
 // https://mongoosejs.com/docs/queries.html
 
+exports.aliasTopTours = (req, res, next) => {
+  req.query.limit = '5';
+  req.query.sort = '-ratingsAverage,price';
+  req.query.fields = 'name,price,ratingsAverage,summary,difficulty';
+  //the third argument is next in order to call next() in order to call the next middleware that is in the middleware stack
+  next();
+};
+
 exports.getAllTours = async (req, res) => {
   try {
-    //req.query is an object
-    console.log(req.query);
+    //?EXECUTE QUERY
+    const features = new APIFeatures(Tour.find(), req.query)
+      .filter()
+      .sort()
+      .limitFields()
+      .paginate();
+    const tours = await features.query;
+    //query.find().sort().select().skip().limit(). ...
 
-    //!BUILD QUERY
-    // 1A) Filtering
-    const queryObj = { ...req.query };
-    //      special words that need to be excluded from the query search in the db
-    const excludedFields = ['page', 'sort', 'limit', 'fields'];
-    excludedFields.forEach(el => delete queryObj[el]);
-
-    // 1B) Advanced filtering
-    let queryStr = JSON.stringify(queryObj);
-    //      g = replace all found, not only the first one
-    //      we use gte(>=) lte(<=) etc as filters instead of "="
-    //      in mongoDB the gte,lte,lt,gt etc should have a "$" before them
-    queryStr = queryStr.replace(/\b(gte|gt|lte|lt)\b/g, match => `$${match}`);
-
-    //      Tour.find() returns a query, so we can chain more methods to it
-    let query = Tour.find(JSON.parse(queryStr));
-
-    // 2) Sorting
-    if (req.query.sort) {
-      //we pass a second criteria separated with a , for the sort in case there is a tie we'll use the second criteria as a determinator
-      const sortBy = req.query.sort.split(',').join(' ');
-      //here the sortBy should look something like "price ratingsAverage difficulty" etc
-      query = query.sort(sortBy);
-    } else {
-      //adding a default sort criteria as the ascending date
-      query = query.sort('-createdAt');
-    }
-
-    // 3) Field limiting -> get back only some fields (great for data heavy data sets)
-    if (req.query.fields) {
-      const fields = req.query.fields.split(',').join(' ');
-      //this operation is called projecting:
-      query = query.select(fields); //the data should look like 'name duration price'
-    } else {
-      // by default exclude __v and show everything else, __v is used internally by mongodb
-      query = query.select('-__v');
-    }
-
-    //!EXECUTE QUERY
-    const tours = await query;
-
-    //!SEND RESPONSE
+    //?SEND RESPONSE
     res.status(200).json({
       status: 'success',
       results: tours.length,
@@ -136,6 +110,106 @@ exports.deleteTour = async (req, res) => {
     res.status(204).json({
       status: 'success',
       data: null
+    });
+  } catch (err) {
+    res.status(404).json({
+      status: 'fail',
+      message: err
+    });
+  }
+};
+
+exports.getTourStats = async (req, res) => {
+  try {
+    const stats = await Tour.aggregate([
+      {
+        $match: { ratingsAverage: { $gte: 4.5 } }
+      },
+      {
+        $group: {
+          _id: { $toUpper: '$difficulty' }, //group by difficulty
+          numTours: { $sum: 1 }, //for each document going through this pipeline, 1 will be added to the counter
+          numOfRatings: { $sum: '$ratingsQuantity' },
+          avgRating: { $avg: '$ratingsAverage' },
+          avgPrice: { $avg: '$price' },
+          minPrice: { $min: '$price' },
+          maxPrice: { $max: '$price' }
+        }
+      },
+      {
+        $sort: {
+          avgPrice: 1 //ascending by average price
+        }
+      }
+      // {
+      //   $match: {
+      //     //now, _id is the difficulty, as set up above
+      //     _id: { $ne: 'EASY' } //all document that are not easy
+      //   }
+      // }
+    ]);
+    res.status(200).json({
+      status: 'success',
+      data: {
+        stats
+      }
+    });
+  } catch (err) {
+    res.status(404).json({
+      status: 'fail',
+      message: err
+    });
+  }
+};
+
+exports.getMonthlyPlan = async (req, res) => {
+  try {
+    const year = req.params.year * 1;
+
+    const plan = await Tour.aggregate([
+      {
+        $unwind: '$startDates' //deconstruct an array field and then output one document for each element of the array
+      },
+      {
+        $match: {
+          startDates: {
+            $gte: new Date(`${year}-01-01`),
+            $lte: new Date(`${year}-12-31`)
+          }
+        }
+      },
+      {
+        $group: {
+          _id: { $month: '$startDates' },
+          numTourStarts: { $sum: 1 },
+          tours: { $push: '$name' }
+        }
+      },
+      {
+        $addFields: {
+          month: '$_id'
+        }
+      },
+      {
+        $project: {
+          _id: 0 //the _id no longer shows up
+        }
+      },
+      {
+        $sort: {
+          numTourStarts: -1
+        }
+      },
+      {
+        $limit: 12 //limit to 12 outputs
+      }
+    ]);
+
+    res.status(200).json({
+      status: 'success',
+      data: {
+        plan
+      }
     });
   } catch (err) {
     res.status(404).json({
